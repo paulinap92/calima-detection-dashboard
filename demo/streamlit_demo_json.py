@@ -33,7 +33,7 @@ CALIMA_BG = """
 """
 st.markdown(CALIMA_BG, unsafe_allow_html=True)
 
-DEFAULT_DATA_PATH = Path("demo\calima_export.json")
+DEFAULT_DATA_PATH = Path("demo/calima_export.json")
 
 
 # ==========================================================
