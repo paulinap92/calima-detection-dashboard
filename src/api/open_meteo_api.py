@@ -32,7 +32,16 @@ LOCATIONS: dict[str, tuple[float, float]] = {
     "santa_cruz": (28.4636, -16.2518),
     "puerto_de_la_cruz": (28.4140, -16.5449),
     "adeje": (28.1227, -16.7260),
+    "puertito_de_guimar": (28.3090, -16.3810),
+
+    "gran_canaria_las_palmas": (28.1235, -15.4363),
+    "lanzarote_arrecife": (28.9630, -13.5477),
+    "fuerteventura_puerto_del_rosario": (28.5004, -13.8627),
+    "la_palma_santa_cruz": (28.6835, -17.7642),
+    "la_gomera_san_sebastian": (28.0916, -17.1110),
+    "el_hierro_valverde": (27.8069, -17.9157),
 }
+
 
 FORECAST_URL = "https://air-quality-api.open-meteo.com/v1/air-quality"
 
