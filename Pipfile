@@ -1,0 +1,27 @@
+[[source]]
+url = "https://pypi.org/simple"
+verify_ssl = true
+name = "pypi"
+
+[packages]
+pymongo = "*"
+dotenv = "*"
+mongoengine = "*"
+pandas = "*"
+scikit-learn = "*"
+requests = "*"
+streamlit = "*"
+plotly = "*"
+apscheduler = "*"
+python-dotenv = "*"
+pandas-stubs = "~=2.3.3"
+streamlit-plotly-events = "*"
+mongomock = "*"
+
+[dev-packages]
+pytest = "*"
+pytest-cov = "*"
+testcontainers = {extras = ["test"], version = "*"}
+
+[requires]
+python_version = "3.12"

@@ -1,0 +1,25 @@
+[run]
+source = src
+branch = True
+omit =
+    */__init__.py
+    */tests/*
+    */migrations/*
+    */venv/*
+    */.venv/*
+    */site-packages/*
+    src/dashboard/*
+    src/**/dashboard/*
+    src/repository/db_config
+
+[report]
+exclude_lines =
+    pragma: no cover
+    if __name__ == .__main__.:
+
+ignore_errors = True
+show_missing = True
+
+[html]
+directory = coverage_html
+
