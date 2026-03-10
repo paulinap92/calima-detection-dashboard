@@ -42,42 +42,7 @@ The system collects air-quality data, stores it in MongoDB, detects Calima event
 
 ---
 
-## 🧭 System Architecture (Mermaid)
 
-### High-level flow
-
-```mermaid
-flowchart LR
-  A[Open-Meteo API<br/>hourly signals] -->|fetch| B[UpdateService<br/>src/service/update_service.py]
-  B -->|upsert hourly measurements| C[(MongoDB)]
-  C --> D[ReadAirRepository<br/>src/repository/repository.py]
-  D --> E[CalimaDetector<br/>src/repository/calima_detector.py]
-  E -->|persist closed events (>= 3h)| F[ModifyAirRepository<br/>src/repository/repository.py]
-  F --> C
-  C --> G[Streamlit Dashboard<br/>streamlit_main.py]
-```
-
-### Hourly scheduler (what runs in production)
-
-```mermaid
-sequenceDiagram
-  autonumber
-  participant S as Scheduler (BlockingScheduler)
-  participant U as run_full_update()
-  participant API as Open-Meteo API
-  participant DB as MongoDB (MongoEngine)
-  participant DET as CalimaDetector
-
-  S->>U: trigger (immediate + every 1h)
-  U->>API: fetch hourly air-quality signals
-  API-->>U: response (pm10/pm25/dust/aod...)
-  U->>DB: upsert AirMeasurement (unique index)
-  U->>DET: detect_events(location)
-  DET->>DB: read measurements/events (Read repo)
-  DET->>DB: write CalimaEvent (Modify repo)\nONLY if closed & >=3h
-```
-
----
 
 ## 🧱 Project Structure
 
@@ -168,10 +133,10 @@ classDiagram
 
   class AirQualityData {
     +timestamp: datetime (UTC)
-    +pm10: float?
-    +pm25: float?
-    +dust: float?
-    +aod: float?
+    +pm10: float
+    +pm25: float
+    +dust: float
+    +aod: float
     +is_calima: bool
   }
 
@@ -185,9 +150,9 @@ classDiagram
     +location: AirLocation (ref)
     +start_time: datetime (UTC)
     +end_time: datetime (UTC)
-    +peak_pm10: float?
-    +peak_dust: float?
-    +peak_aod: float?
+    +peak_pm10: float
+    +peak_dust: float
+    +peak_aod: float
   }
 
   AirLocation "1" --> "many" AirMeasurement : CASCADE
