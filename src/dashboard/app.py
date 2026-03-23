@@ -121,7 +121,7 @@ def main() -> None:
         # ÚLTIMA MEDICIÓN
         # ---------------------------------------------------------
         st.subheader("📍 Última medición registrada")
-        last = measurements[-1]
+        last = repo.get_latest(current)
         timestamp_str = last.data.timestamp.strftime("%Y-%m-%d %H:%M")
         st.markdown(f"**Última actualización:** `{timestamp_str}`")
 
@@ -153,7 +153,7 @@ def main() -> None:
 
         with right:
             if events:
-                last_event = events[-1]
+                last_event = events[0]
                 st.markdown("**Último episodio detectado:**")
                 st.markdown(
                     f"- ⏱️ `{last_event.start_time}` → `{last_event.end_time}`\n"
