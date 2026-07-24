@@ -33,38 +33,47 @@ class UpdateService:
         self.read_repo = ReadAirRepository()
         self.detector = CalimaDetector(self.read_repo, self.modify_repo)
 
-    # ------------------------------------------------------------------
-    # 1) HISTORY IMPORT — only when location has no data yet
-    # ------------------------------------------------------------------
     def fetch_history_last_days(self, location: str, days: int) -> int:
         """
-        Fetch up to 30 days of historical hourly data.
+        Fetches historical hourly data and fills missing records.
+
+        This method is a real backfill: it does not skip all timestamps older
+        than the latest saved measurement. Instead, it checks each timestamp
+        individually and inserts only missing records.
+
         Only timestamps <= now are saved.
-        Forecast does NOT appear in this API call.
+        Forecast does not appear in this API call.
+
+        Args:
+            location: Location key.
+            days: Number of historical days to fetch.
 
         Returns:
             Number of inserted records.
         """
-
         if days > 90:
             raise ValueError("Open-Meteo supports past_days <= 90.")
 
         aq = fetch_history_days(location, days)
 
-        latest = self.read_repo.get_latest(location)
-        last_ts = latest.data.timestamp if latest else None
+        existing_measurements = self.read_repo.get_measurements(location)
+        existing_timestamps = {
+            measurement.data.timestamp.replace(minute=0, second=0, microsecond=0)
+            for measurement in existing_measurements
+        }
 
-        now = datetime.utcnow()   # naive UTC timestamp
+        now = datetime.utcnow()  # naive UTC timestamp
 
         to_insert = []
 
         for i, ts in enumerate(aq.time):
+            ts = ts.replace(minute=0, second=0, microsecond=0)
 
-            # skip duplicate hours
-            if last_ts and ts <= last_ts:
+            # Skip exact duplicate hours, but allow older missing hours.
+            if ts in existing_timestamps:
                 continue
 
-            # skip future hours (in history shouldn't happen, but safe)
+            # Skip future hours.
             if ts > now:
                 continue
 
@@ -90,10 +99,64 @@ class UpdateService:
         logger.info(f"[HISTORY] {location}: inserted {inserted} records")
 
         return inserted
-
     # ------------------------------------------------------------------
     # 2) LATEST UPDATE — save only real hours, return forecast
     # ------------------------------------------------------------------
+    # def fetch_latest_update(self, location: str):
+    #     """
+    #     Fetch a combined dataset:
+    #         • past_days=2 (real)
+    #         • forecast_days=3 (future)
+    #
+    #     Saves ONLY real data (timestamps <= now).
+    #     Forecast hours are returned for dashboard usage.
+    #     """
+    #
+    #     aq = fetch_update(location)
+    #     now = datetime.utcnow()
+    #
+    #     latest = self.read_repo.get_latest(location)
+    #     last_ts = latest.data.timestamp if latest else None
+    #
+    #     real_insert_list = []
+    #     forecast_list = []
+    #
+    #     existing_timestamps = self.read_repo.get_existing_timestamps(
+    #         location=location,
+    #         start=start,
+    #         end=end,
+    #     )
+    #
+    #     for i, ts in enumerate(aq.time):
+    #
+    #         pm10 = aq.pm10[i]
+    #         pm25 = aq.pm25[i]
+    #         dust = aq.dust[i]
+    #         aod = aq.aod[i]
+    #
+    #         is_calima = self.detector.is_calima_from_values(pm10, pm25, dust, aod)
+    #
+    #         model = AirQualityData(
+    #             timestamp=ts,
+    #             pm10=pm10,
+    #             pm25=pm25,
+    #             dust=dust,
+    #             aod=aod,
+    #             is_calima=is_calima,
+    #         )
+    #
+    #         if ts <= now:
+    #             # REAL DATA
+    #             if last_ts is None or ts > last_ts:
+    #                 real_insert_list.append(model)
+    #         else:
+    #             # FORECAST — do not save
+    #             forecast_list.append(model)
+    #
+    #     inserted = self.modify_repo.bulk_add_measurements(location, real_insert_list)
+    #     logger.info(f"[UPDATE] {location}: inserted {inserted} real hours (forecast skipped)")
+    #
+    #     return inserted, forecast_list
     def fetch_latest_update(self, location: str):
         """
         Fetch a combined dataset:
@@ -107,8 +170,16 @@ class UpdateService:
         aq = fetch_update(location)
         now = datetime.utcnow()
 
-        latest = self.read_repo.get_latest(location)
-        last_ts = latest.data.timestamp if latest else None
+        real_times = [ts for ts in aq.time if ts <= now]
+
+        if real_times:
+            existing_timestamps = self.read_repo.get_existing_timestamps(
+                location_name=location,
+                start=min(real_times),
+                end=max(real_times),
+            )
+        else:
+            existing_timestamps = set()
 
         real_insert_list = []
         forecast_list = []
@@ -132,18 +203,15 @@ class UpdateService:
             )
 
             if ts <= now:
-                # REAL DATA
-                if last_ts is None or ts > last_ts:
+                if ts not in existing_timestamps:
                     real_insert_list.append(model)
             else:
-                # FORECAST — do not save
                 forecast_list.append(model)
 
         inserted = self.modify_repo.bulk_add_measurements(location, real_insert_list)
         logger.info(f"[UPDATE] {location}: inserted {inserted} real hours (forecast skipped)")
 
         return inserted, forecast_list
-
     # ------------------------------------------------------------------
     # 3) FULL UPDATE — save data + detect calima events
     # ------------------------------------------------------------------
