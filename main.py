@@ -1,11 +1,11 @@
 import logging
-from datetime import datetime
+
 from apscheduler.schedulers.blocking import BlockingScheduler
 
 from src.repository.db_config import connect_nosql_db, disconnect_nosql_db
-from src.service.update_service import UpdateService
-from src.repository.repository import ModifyAirRepository, ReadAirRepository
 from src.repository.model import AirLocation
+from src.repository.repository import ModifyAirRepository
+from src.service.update_service import UpdateService
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -27,10 +27,8 @@ LOCS = [
 ]
 
 
-# ---------------------------------------------------------
-# Ensure mandatory locations
-# ---------------------------------------------------------
 def ensure_locations(repo: ModifyAirRepository) -> None:
+    """Create required locations when they do not yet exist."""
     coords: dict[str, tuple[float, float]] = {
         # Tenerife
         "santa_cruz": (28.4636, -16.2518),
@@ -61,78 +59,61 @@ def ensure_locations(repo: ModifyAirRepository) -> None:
     for name, (lat, lon) in coords.items():
         if AirLocation.objects(name=name).first() is None:
             repo.add_location(name, lat, lon)
-            logger.info(f"[INIT] Added location: {name}")
+            logger.info("[INIT] Added location: %s", name)
         else:
-            logger.info(f"[INIT] Location OK: {name}")
+            logger.info("[INIT] Location OK: %s", name)
 
-# ---------------------------------------------------------
-# Import 90-day history IF database is empty
-# ---------------------------------------------------------
-def import_initial_history(updater: UpdateService, read_repo: ReadAirRepository, location: str) -> None:
+
+def run_full_update(*, run_backfill: bool = False) -> None:
+    """Run one production update cycle.
+
+    A 90-day historical backfill is used only during application startup.
+    Hourly scheduler runs use the lighter latest-data update.
     """
-    Runs ONLY if a location has no measurements at all.
-    Prevents downloading large amounts of data every scheduler cycle.
-    """
-    count = len(read_repo.get_measurements(location))
-    if count > 0:
-        logger.info(f"[HISTORY] {location}: existing data found → skipping backfill")
-        return
-
-    logger.info(f"[HISTORY] {location}: no data found → importing 30 days")
-    updater.fetch_history_last_days(location, 90)
-    logger.info(f"[HISTORY] {location}: initial backfill completed")
-
-
-# ---------------------------------------------------------
-# FULL UPDATE CYCLE (PROD ONLY)
-# ---------------------------------------------------------
-def run_full_update() -> None:
     try:
         connect_nosql_db()
         logger.info("=== MongoDB connected (PROD) ===")
 
         updater = UpdateService()
-        read_repo = updater.read_repo
-
-        # 1) ensure locations
         ensure_locations(updater.modify_repo)
 
-        # 2) ensure historical backfill ONCE (per location)
-        for loc in LOCS:
-            import_initial_history(updater, read_repo, loc)
+        if run_backfill:
+            logger.info("=== 90-DAY BACKFILL START (PROD) ===")
+            for location in LOCS:
+                updater.fetch_history_last_days(location, 90)
+            logger.info("=== 90-DAY BACKFILL FINISHED (PROD) ===")
 
-        # 3) hourly update
-        logger.info("=== HOURLY UPDATE (PROD) ===")
-        for loc in LOCS:
-            updater.update_location(loc)
+        logger.info("=== HOURLY UPDATE START (PROD) ===")
+        for location in LOCS:
+            updater.update_location(location)
 
         logger.info("=== UPDATE CYCLE FINISHED (PROD) ===")
 
-    except Exception as ex:
-        logger.error(f"[ERROR] Scheduler failed: {ex}")
+    except Exception:
+        logger.exception("[ERROR] Update cycle failed")
 
     finally:
         disconnect_nosql_db()
         logger.info("MongoDB disconnected (PROD)")
 
 
-# ---------------------------------------------------------
-# APScheduler entrypoint
-# ---------------------------------------------------------
 def main() -> None:
     logger.info("=== CALIMA SCHEDULER STARTED (PROD) ===")
 
-    scheduler = BlockingScheduler()
+    # Render free services may sleep. Each process start repairs gaps from
+    # the previous 90 days before the normal hourly scheduler begins.
+    run_full_update(run_backfill=True)
 
-    # Fire once immediately, then every hour
+    scheduler = BlockingScheduler()
     scheduler.add_job(
         run_full_update,
         "interval",
         hours=1,
-        next_run_time=datetime.now(),
+        kwargs={"run_backfill": False},
         id="prod_update",
         replace_existing=True,
-
+        max_instances=1,
+        coalesce=True,
     )
 
     try:
@@ -140,7 +121,6 @@ def main() -> None:
     except (KeyboardInterrupt, SystemExit):
         logger.info("Scheduler stopped manually.")
     finally:
-        # safe cleanup in case the scheduler is interrupted mid-run
         disconnect_nosql_db()
 
 
