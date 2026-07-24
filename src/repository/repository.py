@@ -331,3 +331,26 @@ class ReadAirRepository:
                 peak_pm10__gte=pm10_min
             ).order_by("-start_time")
         )
+
+    def get_existing_timestamps(
+            self,
+            location_name: str,
+            start: datetime,
+            end: datetime,
+    ) -> set[datetime]:
+        """
+        Return timestamps that already exist for a location within a time range.
+        Used to avoid duplicates and fill missing historical gaps.
+        """
+        try:
+            loc = AirLocation.objects.get(name=location_name)
+        except DoesNotExist:
+            return set()
+
+        measurements = AirMeasurement.objects(
+            location=loc,
+            data__timestamp__gte=start,
+            data__timestamp__lte=end,
+        ).only("data.timestamp")
+
+        return {m.data.timestamp for m in measurements}
