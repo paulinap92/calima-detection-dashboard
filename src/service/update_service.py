@@ -1,6 +1,6 @@
 # src/repository/update_service.py
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from src.api.open_meteo_api import fetch_history_days, fetch_update
 from src.repository.repository import ModifyAirRepository, ReadAirRepository
@@ -11,70 +11,42 @@ logger = logging.getLogger(__name__)
 
 
 class UpdateService:
-    """
-    UpdateService 2.0
-
-    Key principles:
-    1. MongoDB stores ONLY real, historical data (timestamp <= now UTC).
-       Forecast hours are never written to DB.
-
-    2. Every update cycle delivers:
-         • Real data → filter duplicates → save
-         • Forecast → returned to the dashboard (not persisted)
-
-    3. Calima events are computed only from real measurements.
-
-    4. Duplicate protection:
-         An hour is ignored if its timestamp already exists in DB.
-    """
+    """Fetch, repair, and persist hourly air-quality measurements."""
 
     def __init__(self):
         self.modify_repo = ModifyAirRepository()
         self.read_repo = ReadAirRepository()
         self.detector = CalimaDetector(self.read_repo, self.modify_repo)
 
-    def fetch_history_last_days(self, location: str, days: int) -> int:
+    @staticmethod
+    def _completed_hour_cutoff(now: datetime) -> datetime:
+        """Return the start of the current hour.
+
+        Only timestamps strictly before this value are treated as completed
+        observations. This avoids storing the current, still-changing hour.
         """
-        Fetches historical hourly data and fills missing records.
+        return now.replace(minute=0, second=0, microsecond=0)
 
-        This method is a real backfill: it does not skip all timestamps older
-        than the latest saved measurement. Instead, it checks each timestamp
-        individually and inserts only missing records.
+    @staticmethod
+    def _has_any_value(
+        pm10: float | None,
+        pm25: float | None,
+        dust: float | None,
+        aod: float | None,
+    ) -> bool:
+        return any(value is not None for value in (pm10, pm25, dust, aod))
 
-        Only timestamps <= now are saved.
-        Forecast does not appear in this API call.
+    def _build_real_measurements(
+        self,
+        aq,
+        *,
+        cutoff: datetime,
+    ) -> list[AirQualityData]:
+        measurements: list[AirQualityData] = []
 
-        Args:
-            location: Location key.
-            days: Number of historical days to fetch.
-
-        Returns:
-            Number of inserted records.
-        """
-        if days > 90:
-            raise ValueError("Open-Meteo supports past_days <= 90.")
-
-        aq = fetch_history_days(location, days)
-
-        existing_measurements = self.read_repo.get_measurements(location)
-        existing_timestamps = {
-            measurement.data.timestamp.replace(minute=0, second=0, microsecond=0)
-            for measurement in existing_measurements
-        }
-
-        now = datetime.utcnow()  # naive UTC timestamp
-
-        to_insert = []
-
-        for i, ts in enumerate(aq.time):
-            ts = ts.replace(minute=0, second=0, microsecond=0)
-
-            # Skip exact duplicate hours, but allow older missing hours.
-            if ts in existing_timestamps:
-                continue
-
-            # Skip future hours.
-            if ts > now:
+        for i, timestamp in enumerate(aq.time):
+            timestamp = timestamp.replace(minute=0, second=0, microsecond=0)
+            if timestamp >= cutoff:
                 continue
 
             pm10 = aq.pm10[i]
@@ -82,152 +54,106 @@ class UpdateService:
             dust = aq.dust[i]
             aod = aq.aod[i]
 
-            is_calima = self.detector.is_calima_from_values(pm10, pm25, dust, aod)
+            # Open-Meteo can temporarily return an hour with all values null.
+            # Do not persist such a placeholder; retry it during the next cycle.
+            if not self._has_any_value(pm10, pm25, dust, aod):
+                continue
 
-            to_insert.append(
+            measurements.append(
                 AirQualityData(
-                    timestamp=ts,
+                    timestamp=timestamp,
                     pm10=pm10,
                     pm25=pm25,
                     dust=dust,
                     aod=aod,
-                    is_calima=is_calima,
+                    is_calima=self.detector.is_calima_from_values(
+                        pm10,
+                        pm25,
+                        dust,
+                        aod,
+                    ),
                 )
             )
 
-        inserted = self.modify_repo.bulk_add_measurements(location, to_insert)
-        logger.info(f"[HISTORY] {location}: inserted {inserted} records")
+        return measurements
 
-        return inserted
-    # ------------------------------------------------------------------
-    # 2) LATEST UPDATE — save only real hours, return forecast
-    # ------------------------------------------------------------------
-    # def fetch_latest_update(self, location: str):
-    #     """
-    #     Fetch a combined dataset:
-    #         • past_days=2 (real)
-    #         • forecast_days=3 (future)
-    #
-    #     Saves ONLY real data (timestamps <= now).
-    #     Forecast hours are returned for dashboard usage.
-    #     """
-    #
-    #     aq = fetch_update(location)
-    #     now = datetime.utcnow()
-    #
-    #     latest = self.read_repo.get_latest(location)
-    #     last_ts = latest.data.timestamp if latest else None
-    #
-    #     real_insert_list = []
-    #     forecast_list = []
-    #
-    #     existing_timestamps = self.read_repo.get_existing_timestamps(
-    #         location=location,
-    #         start=start,
-    #         end=end,
-    #     )
-    #
-    #     for i, ts in enumerate(aq.time):
-    #
-    #         pm10 = aq.pm10[i]
-    #         pm25 = aq.pm25[i]
-    #         dust = aq.dust[i]
-    #         aod = aq.aod[i]
-    #
-    #         is_calima = self.detector.is_calima_from_values(pm10, pm25, dust, aod)
-    #
-    #         model = AirQualityData(
-    #             timestamp=ts,
-    #             pm10=pm10,
-    #             pm25=pm25,
-    #             dust=dust,
-    #             aod=aod,
-    #             is_calima=is_calima,
-    #         )
-    #
-    #         if ts <= now:
-    #             # REAL DATA
-    #             if last_ts is None or ts > last_ts:
-    #                 real_insert_list.append(model)
-    #         else:
-    #             # FORECAST — do not save
-    #             forecast_list.append(model)
-    #
-    #     inserted = self.modify_repo.bulk_add_measurements(location, real_insert_list)
-    #     logger.info(f"[UPDATE] {location}: inserted {inserted} real hours (forecast skipped)")
-    #
-    #     return inserted, forecast_list
+    def fetch_history_last_days(self, location: str, days: int) -> int:
+        """Upsert historical data and repair missing or incomplete hours."""
+        if days > 90:
+            raise ValueError("Open-Meteo supports past_days <= 90.")
+
+        aq = fetch_history_days(location, days)
+        cutoff = self._completed_hour_cutoff(datetime.utcnow())
+        measurements = self._build_real_measurements(aq, cutoff=cutoff)
+
+        written = self.modify_repo.bulk_add_measurements(
+            location,
+            measurements,
+        )
+        logger.info(
+            "[HISTORY] %s: inserted or repaired %s records",
+            location,
+            written,
+        )
+        return written
+
     def fetch_latest_update(self, location: str):
-        """
-        Fetch a combined dataset:
-            • past_days=2 (real)
-            • forecast_days=3 (future)
-
-        Saves ONLY real data (timestamps <= now).
-        Forecast hours are returned for dashboard usage.
-        """
-
+        """Persist completed real hours and return future forecast hours."""
         aq = fetch_update(location)
         now = datetime.utcnow()
+        cutoff = self._completed_hour_cutoff(now)
 
-        real_times = [ts for ts in aq.time if ts <= now]
+        real_measurements = self._build_real_measurements(aq, cutoff=cutoff)
+        forecast: list[AirQualityData] = []
 
-        if real_times:
-            existing_timestamps = self.read_repo.get_existing_timestamps(
-                location_name=location,
-                start=min(real_times),
-                end=max(real_times),
-            )
-        else:
-            existing_timestamps = set()
-
-        real_insert_list = []
-        forecast_list = []
-
-        for i, ts in enumerate(aq.time):
+        for i, timestamp in enumerate(aq.time):
+            timestamp = timestamp.replace(minute=0, second=0, microsecond=0)
+            if timestamp < cutoff:
+                continue
 
             pm10 = aq.pm10[i]
             pm25 = aq.pm25[i]
             dust = aq.dust[i]
             aod = aq.aod[i]
 
-            is_calima = self.detector.is_calima_from_values(pm10, pm25, dust, aod)
+            if not self._has_any_value(pm10, pm25, dust, aod):
+                continue
 
-            model = AirQualityData(
-                timestamp=ts,
-                pm10=pm10,
-                pm25=pm25,
-                dust=dust,
-                aod=aod,
-                is_calima=is_calima,
+            forecast.append(
+                AirQualityData(
+                    timestamp=timestamp,
+                    pm10=pm10,
+                    pm25=pm25,
+                    dust=dust,
+                    aod=aod,
+                    is_calima=self.detector.is_calima_from_values(
+                        pm10,
+                        pm25,
+                        dust,
+                        aod,
+                    ),
+                )
             )
 
-            if ts <= now:
-                if ts not in existing_timestamps:
-                    real_insert_list.append(model)
-            else:
-                forecast_list.append(model)
+        written = self.modify_repo.bulk_add_measurements(
+            location,
+            real_measurements,
+        )
+        logger.info(
+            "[UPDATE] %s: inserted or repaired %s completed real hours",
+            location,
+            written,
+        )
+        return written, forecast
 
-        inserted = self.modify_repo.bulk_add_measurements(location, real_insert_list)
-        logger.info(f"[UPDATE] {location}: inserted {inserted} real hours (forecast skipped)")
-
-        return inserted, forecast_list
-    # ------------------------------------------------------------------
-    # 3) FULL UPDATE — save data + detect calima events
-    # ------------------------------------------------------------------
     def update_location(self, location: str):
-        """
-        Full update workflow:
-          1. Fetch and save real data.
-          2. Return forecast hours (for dashboard).
-          3. Recalculate calima events based on real data only.
-        """
-
-        inserted, forecast = self.fetch_latest_update(location)
-
-        logger.info(f"[UPDATE] {location}: added {inserted} new real records")
+        written, forecast = self.fetch_latest_update(location)
+        logger.info(
+            "[UPDATE] %s: wrote %s real records",
+            location,
+            written,
+        )
 
         events = self.detector.detect_events(location)
-        logger.info(f"[CALIMA] {location}: {len(events)} events detected")
-
+        logger.info("[CALIMA] %s: %s events detected", location, len(events))
         return forecast
