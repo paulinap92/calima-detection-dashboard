@@ -11,13 +11,10 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 LOCS = [
-    # Tenerife (multi-point)
     "santa_cruz",
     "puerto_de_la_cruz",
     "adeje",
     "puertito_de_guimar",
-
-    # One per remaining islands
     "gran_canaria_las_palmas",
     "lanzarote_arrecife",
     "fuerteventura_puerto_del_rosario",
@@ -30,28 +27,15 @@ LOCS = [
 def ensure_locations(repo: ModifyAirRepository) -> None:
     """Create required locations when they do not yet exist."""
     coords: dict[str, tuple[float, float]] = {
-        # Tenerife
         "santa_cruz": (28.4636, -16.2518),
         "puerto_de_la_cruz": (28.4140, -16.5449),
         "adeje": (28.1227, -16.7260),
         "puertito_de_guimar": (28.3090, -16.3810),
-
-        # Gran Canaria
         "gran_canaria_las_palmas": (28.1235, -15.4363),
-
-        # Lanzarote
         "lanzarote_arrecife": (28.9630, -13.5477),
-
-        # Fuerteventura
         "fuerteventura_puerto_del_rosario": (28.5004, -13.8627),
-
-        # La Palma
         "la_palma_santa_cruz": (28.6835, -17.7642),
-
-        # La Gomera
         "la_gomera_san_sebastian": (28.0916, -17.1110),
-
-        # El Hierro
         "el_hierro_valverde": (27.8069, -17.9157),
     }
 
@@ -65,11 +49,7 @@ def ensure_locations(repo: ModifyAirRepository) -> None:
 
 
 def run_full_update(*, run_backfill: bool = False) -> None:
-    """Run one production update cycle.
-
-    A 90-day historical backfill is used only during application startup.
-    Hourly scheduler runs use the lighter latest-data update.
-    """
+    """Run one production update cycle."""
     try:
         connect_nosql_db()
         logger.info("=== MongoDB connected (PROD) ===")
@@ -100,17 +80,31 @@ def run_full_update(*, run_backfill: bool = False) -> None:
 def main() -> None:
     logger.info("=== CALIMA SCHEDULER STARTED (PROD) ===")
 
-    # Render free services may sleep. Each process start repairs gaps from
-    # the previous 90 days before the normal hourly scheduler begins.
+    # Repair the previous 90 days whenever Render starts the service.
     run_full_update(run_backfill=True)
 
     scheduler = BlockingScheduler()
+
+    # Lightweight recent-data refresh every hour.
     scheduler.add_job(
         run_full_update,
         "interval",
         hours=1,
         kwargs={"run_backfill": False},
-        id="prod_update",
+        id="hourly_update",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+
+    # Recheck the full recoverable history once a day. This is still part of
+    # the free web service process and does not require a paid Render Cron Job.
+    scheduler.add_job(
+        run_full_update,
+        "interval",
+        hours=24,
+        kwargs={"run_backfill": True},
+        id="daily_backfill",
         replace_existing=True,
         max_instances=1,
         coalesce=True,
