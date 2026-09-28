@@ -24,4 +24,4 @@ COPY . /app
 # --------------------------
 # Run scheduler + Streamlit
 # --------------------------
-CMD ["bash", "-c", "python -m demo.export_mongo_to_json && (python main.py &) && exec streamlit run streamlit_main.py --server.port=8501 --server.address=0.0.0.0"]
+CMD ["bash", "-c", "mkdir -p static && (python -m demo.export_mongo_to_json &) && (python main.py &) && exec streamlit run streamlit_main.py --server.port=8501 --server.address=0.0.0.0"]
